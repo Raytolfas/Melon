@@ -1,6 +1,6 @@
 <div align="center">
 
-# Melon MC
+<img src="https://github.com/MIXITOSIK/MIXITOSIK/blob/main/other_assets/banner-nc.png?raw=true" alt="RMC Shaders Image Banner" width="512">
 
 **Melon MC — High-performance Minecraft server core written in Rust.**
 
