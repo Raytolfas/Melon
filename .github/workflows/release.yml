@@ -1,212 +1,95 @@
-name: Release
+name: Manual Release
 
 on:
-  push:
-    tags:
-      - "*"
-      - "!nightly"
-      - "!nightly*"
-      - "!canary"
-      - "!canary*"
   workflow_dispatch:
     inputs:
-      tag_name:
-        description: "Release Tag name (optional, defaults to Cargo.toml version)"
-        required: false
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
         type: string
+      draft:
+        description: "Mark as draft release"
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-Dwarnings"
 
 jobs:
-  build_release:
-    name: Build & Sign Release
+  build_binaries:
+    name: Build Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            arch: X64
-          - os: ubuntu-latest
-            arch: X64-v3
-            rustflags: -C target-cpu=x86-64-v3
-          - os: ubuntu-26.04-arm
-            arch: ARM64
+            target: x86_64-unknown-linux-gnu
+            binary_src: target/x86_64-unknown-linux-gnu/release/melon
+            asset_name: melon-linux-x86_64
           - os: windows-latest
-            arch: X64
-          - os: windows-latest
-            arch: X64-v3
-            rustflags: -C target-cpu=x86-64-v3
-          - os: windows-11-arm
-            arch: ARM64
-          - os: macos-latest
-            arch: ARM64
-    env:
-      RUSTFLAGS: -Dwarnings ${{ matrix.rustflags }}
+            target: x86_64-pc-windows-msvc
+            binary_src: target/x86_64-pc-windows-msvc/release/melon.exe
+            asset_name: melon-windows-x86_64.exe
+
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - run: rustup update stable && rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          key: ${{ matrix.arch }}
+          targets: ${{ matrix.target }}
 
-      - name: Build Release
-        shell: bash
-        run: cargo build --verbose --release
-
-      - name: Prepare artifacts
-        shell: bash
-        run: |
-          mkdir -p dist
-          EXT=""
-          if [ "${{ runner.os }}" == "Windows" ]; then EXT=".exe"; fi
-          cp "target/release/pumpkin$EXT" "dist/pumpkin-${{ matrix.arch }}-${{ runner.os }}$EXT"
-
-      - name: Upload unsigned Windows executable
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
         with:
-          name: unsigned-${{ matrix.arch }}-${{ runner.os }}
-          path: dist/pumpkin-*
-          retention-days: 14
+          key: ${{ matrix.target }}-release
 
-      - name: Export executable
-        if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: pumpkin-${{ matrix.arch }}-${{ runner.os }}
-          compression-level: 9
-          path: dist/pumpkin-*
-
-  sign_windows_release:
-    name: Sign Windows release
-    permissions:
-      actions: read
-    needs: build_release
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            arch: X64
-          - os: windows-latest
-            arch: X64-v3
-          - os: windows-11-arm
-            arch: ARM64
-    steps:
-      - name: Find unsigned artifact
-        id: artifact
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT_NAME: unsigned-${{ matrix.arch }}-${{ runner.os }}
-        run: |
-          ARTIFACT_ID=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
-            --jq '.artifacts | map(select(.name == env.ARTIFACT_NAME and .expired == false)) | first.id')
-          test -n "$ARTIFACT_ID"
-          echo "id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Submit SignPath signing request
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '${{ secrets.SIGNPATH_ORGANIZATION_ID }}'
-          project-slug: '${{ secrets.SIGNPATH_PROJECT_SLUG }}'
-          signing-policy-slug: '${{ secrets.SIGNPATH_RELEASE_SIGNING_POLICY_SLUG || secrets.SIGNPATH_SIGNING_POLICY_SLUG }}'
-          github-artifact-id: '${{ steps.artifact.outputs.id }}'
-          wait-for-completion: true
-          output-artifact-directory: dist/
-
-      - name: Export signed executable
-        uses: actions/upload-artifact@v7
-        with:
-          name: pumpkin-${{ matrix.arch }}-${{ runner.os }}
-          compression-level: 9
-          path: dist/pumpkin-*
-
-  build_android_release:
-    name: Build project in release for Android (AArch64)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-      - uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r30
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk
-      - uses: Swatinem/rust-cache@v2
-      - name: Build Release with cargo ndk
-        env:
-          CARGO_NDK_PLATFORM: 24
-        run: cargo ndk -t arm64-v8a build --release --locked
-      - name: Prepare artifacts
+      - name: Compile Melon MC
         shell: bash
         run: |
-          mkdir -p dist
-          cp "target/aarch64-linux-android/release/pumpkin" "dist/pumpkin-aarch64-android"
-      - name: Export executable
-        uses: actions/upload-artifact@v7
+          cargo build --release --bin melon --target ${{ matrix.target }}
+          cp ${{ matrix.binary_src }} ./${{ matrix.asset_name }}
+
+      - name: Upload artifact for release job
+        uses: actions/upload-artifact@v4
         with:
-          name: pumpkin-aarch64-android
-          compression-level: 9
-          path: dist/pumpkin-aarch64-android
+          name: ${{ matrix.asset_name }}
+          path: ./${{ matrix.asset_name }}
 
   publish_release:
     name: Publish GitHub Release
-    permissions:
-      contents: write
-    needs: [build_release, sign_windows_release, build_android_release]
+    needs: build_binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Determine tag name
-        id: tag
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
-            TAG="${{ github.event.inputs.tag_name }}"
-          elif [ "${{ github.ref_type }}" == "tag" ]; then
-            TAG="${{ github.ref_name }}"
-          else
-            VERSION=$(awk -F '"' '/^version/ {print $2}' Cargo.toml)
-            TAG="${VERSION}"
-          fi
-          echo "tag_name=${TAG}" >> $GITHUB_OUTPUT
-          echo "Determined release tag: ${TAG}"
-
-      - name: Download prebuilt binary artifacts
-        uses: actions/download-artifact@v8
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
         with:
-          pattern: "pumpkin-*"
-          path: dist/
+          path: release-assets
           merge-multiple: true
 
-      - name: Generate Checksums
-        shell: bash
-        run: |
-          cd dist
-          sha256sum pumpkin-* > checksums.sha256
-          cat checksums.sha256
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag_name }}
-          name: Release ${{ steps.tag.outputs.tag_name }}
-          files: |
-            dist/pumpkin*
-            dist/checksums.sha256
+          tag_name: ${{ inputs.tag }}
+          name: Melon MC ${{ inputs.tag }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          files: release-assets/*
           generate_release_notes: true
